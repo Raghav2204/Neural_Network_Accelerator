@@ -1,53 +1,46 @@
-module tb_mac;
+`timescale 1ns/1ps
 
-    reg clk, reset, enable;
-    reg signed [7:0] w;    // weight (example)
-    wire signed [7:0] x;   // pixel input
-    wire signed [15:0] y;
+module tb_mnist_mlp_accelerator();
+    reg clk, reset, start;
+    reg [3:0] image_index;
+    wire [3:0] predicted_digit;
+    wire done;
 
-    reg [9:0] addr;        // pixel index 0-783
-
-    // Instantiate image memory
-    image_mem imem (
-        .addr(addr),
-        .pixel(x)
-    );
-
-    // Instantiate MAC
-    MAC mac_unit (
+    // Instantiate DUT
+    mnist_mlp_accelerator uut (
         .clk(clk),
         .reset(reset),
-        .x(x),
-        .w(w),
-        .enable(enable),
-        .y(y)
+        .start(start),
+        .image_index(image_index),
+        .predicted_digit(predicted_digit),
+        .done(done)
     );
 
-    // Clock generator
-    always #5 clk = ~clk;
+    // Clock generation
+    always #5 clk = ~clk; // 100MHz clock
 
     initial begin
-        // init
+        // Initialize
         clk = 0;
         reset = 1;
-        enable = 0;
-        addr = 0;
-        w = 8'sd1;   // example: weight = 1
-        #10 reset = 0;
+        start = 0;
+        image_index = 0;
 
-        // Feed all 784 pixels
-        for (addr = 0; addr < 784; addr = addr + 1) begin
-            enable = 1;
-            #10;   // wait one clock cycle
-        end
+        // Apply reset
+        #20;
+        reset = 0;
 
-        enable = 0;
+        // Start operation
+        #10;
+        start = 1;
+        #10;
+        start = 0;
+
+        // Wait for completion
+        wait(done);
         #20;
 
-        $display("Final MAC output: %d", y);
-        $finish;
+        $display("Predicted digit for image %0d = %0d", image_index, predicted_digit);
+        $stop;
     end
-
-
-
 endmodule
