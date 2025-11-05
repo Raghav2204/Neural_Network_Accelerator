@@ -1,32 +1,331 @@
-module image_mem (
-    input  [9:0] addr,       // 0-783 → needs 10 bits
-    output [7:0] pixel
-);
+`timescale 1ns/1ps
 
-    reg [7:0] mem [0:783];   // 28x28 = 784 pixels
+// ============================================================
+// MODULE 1: Image Memory
+// ============================================================
+module image_mem (
+    input [3:0] image_index, // Image indexing in combined form 
+    input [9:0] addr,        // Address range 0-783
+    output reg [7:0] pixel
+);
+    reg [7:0] mem [0:784*10-1];
 
     initial begin
-        $readmemh("image0.mem", mem);
+        $readmemh("images.mem", mem);
     end
 
-    assign pixel = mem[addr];
+    always @(*) begin
+        pixel = mem[image_index*784 + addr];
+    end
 endmodule
 
+// ============================================================
+// MODULE 2: ReLU Activation Function
+// ============================================================
+module RELU (
+    input  signed [15:0] in,
+    output signed [15:0] out
+);
+    assign out = (in[15]) ? 16'd0 : in;
+endmodule
 
-
-
-module MAC (
-    input  clk, reset,
-    input  signed [7:0] x,   // input value
-    input  signed [7:0] w,   // weight
-    input  enable,
-    output reg signed [15:0] y   // accumulated result
-    
+// ============================================================
+// MODULE 3: Layer 1 MAC
+// ============================================================
+module MAC_L1 (
+    input clk, reset, enable,
+    input  signed [7:0] x,
+    input  signed [7:0] w,
+    output reg signed [15:0] y
 );
     always @(posedge clk or posedge reset) begin
         if (reset)
             y <= 0;
         else if (enable)
-            y <= y + (x * w);   // multiply and accumulate
+            y <= y + (x * w);
     end
+endmodule
+
+// ============================================================
+// MODULE 4: Hidden Layer Weights
+// ============================================================
+module hidden_weight_mem (
+    input [3:0] weight_index,
+    input [9:0] addr,
+    output reg signed [7:0] weight
+);
+    reg signed [7:0] mem [0:16*784-1];
+    initial begin
+        $readmemh("hidden_weights.mem", mem);
+    end
+    always @(*) begin
+        weight = mem[weight_index*784 + addr];
+    end
+endmodule
+
+// ============================================================
+// MODULE 5: Hidden Layer Biases
+// ============================================================
+module hidden_bias_mem (
+    input [3:0] neuron_index,
+    output reg signed [15:0] bias
+);
+    reg signed [15:0] mem [0:15];
+    initial begin
+        $readmemh("biases.mem", mem);
+    end
+    always @(*) begin
+        bias = mem[neuron_index];
+    end
+endmodule
+
+// ============================================================
+// MODULE 6: Hidden Neuron
+// ============================================================
+module hidden_neuron (
+    input clk, reset, enable,
+    input [3:0] image_index,
+    input [3:0] neuron_index,
+    input [9:0] addr,
+    output signed [15:0] relu_out
+);
+    wire [7:0] pixel;
+    wire signed [7:0] weight;
+    wire signed [15:0] mac_out;
+    wire signed [15:0] bias_val;
+    wire signed [15:0] mac_with_bias;
+
+    image_mem img (.image_index(image_index), .addr(addr), .pixel(pixel));
+    hidden_weight_mem wgt (.weight_index(neuron_index), .addr(addr), .weight(weight));
+    hidden_bias_mem bmem (.neuron_index(neuron_index), .bias(bias_val));
+
+    MAC_L1 mac_unit (.clk(clk), .reset(reset), .x(pixel), .w(weight), .enable(enable), .y(mac_out));
+
+    assign mac_with_bias = mac_out + bias_val;
+
+    RELU act (.in(mac_with_bias), .out(relu_out));
+endmodule
+
+// ============================================================
+// MODULE 7: Layer 2 MAC
+// ============================================================
+module MAC_L2 (
+    input clk, reset, enable,
+    input signed [15:0] x,
+    input signed [7:0] w,
+    output reg signed [15:0] y
+);
+    always @(posedge clk or posedge reset) begin
+        if (reset)
+            y <= 0;
+        else if (enable)
+            y <= y + (x * w);
+    end
+endmodule
+
+// ============================================================
+// MODULE 8: Output Layer Weights
+// ============================================================
+module output_weight_mem (
+    input [3:0] weight_index,
+    input [3:0] addr,
+    output reg signed [7:0] weight
+);
+    reg signed [7:0] mem [0:10*16-1];
+    initial begin
+        $readmemh("output_weights.mem", mem);
+    end
+    always @(*) begin
+        weight = mem[weight_index*16 + addr];
+    end
+endmodule
+
+// ============================================================
+// MODULE 9: Output Layer Biases
+// ============================================================
+module output_bias_mem (
+    input [3:0] neuron_index,
+    output reg signed [15:0] bias
+);
+    reg signed [15:0] mem [0:9];
+    initial begin
+        $readmemh("output_biases.mem", mem);
+    end
+    always @(*) begin
+        bias = mem[neuron_index];
+    end
+endmodule
+
+// ============================================================
+// MODULE 10: Output Neuron
+// ============================================================
+module output_neuron (
+    input clk, reset, enable,
+    input signed [15:0] hidden_activation,
+    input [3:0] neuron_index,
+    input [3:0] addr,
+    output signed [15:0] relu_out
+);
+    wire signed [7:0] weight;
+    wire signed [15:0] mac_out;
+    wire signed [15:0] bias_val;
+    wire signed [15:0] mac_with_bias;
+
+    output_weight_mem wgt (.weight_index(neuron_index), .addr(addr), .weight(weight));
+    output_bias_mem bmem (.neuron_index(neuron_index), .bias(bias_val));
+    MAC_L2 mac_unit (.clk(clk), .reset(reset), .x(hidden_activation), .w(weight), .enable(enable), .y(mac_out));
+
+    assign mac_with_bias = mac_out + bias_val;
+    RELU act (.in(mac_with_bias), .out(relu_out));
+endmodule
+
+// ============================================================
+// MODULE 11: Controller FSM
+// ============================================================
+module accelerator_controller (
+    input clk, reset, start,
+    output reg h_reset, h_enable,
+    output reg [9:0] h_addr,
+    output reg o_reset, o_enable,
+    output reg [3:0] o_addr,
+    output reg done,
+    output reg store_h_results
+);
+    localparam IDLE=3'b000, RESET_H=3'b001, RUN_H=3'b010,
+               RESET_O=3'b011, RUN_O=3'b100, DONE=3'b101;
+
+    reg [2:0] state, next_state;
+
+    always @(posedge clk or posedge reset)
+        if (reset) state <= IDLE;
+        else state <= next_state;
+
+    always @(posedge clk or posedge reset) begin
+        if (reset) begin
+            h_addr <= 0;
+            o_addr <= 0;
+        end else if (state == RUN_H) begin
+            if (h_addr < 783) h_addr <= h_addr + 1;
+            else h_addr <= 0;
+        end else if (state == RUN_O) begin
+            if (o_addr < 15) o_addr <= o_addr + 1;
+            else o_addr <= 0;
+        end
+    end
+
+    always @(*) begin
+        next_state = state;
+        case (state)
+            IDLE:    if (start) next_state = RESET_H;
+            RESET_H: next_state = RUN_H;
+            RUN_H:   if (h_addr == 783) next_state = RESET_O;
+            RESET_O: next_state = RUN_O;
+            RUN_O:   if (o_addr == 15) next_state = DONE;
+            DONE:    next_state = IDLE;
+        endcase
+    end
+
+    always @(*) begin
+        h_reset=0; h_enable=0; o_reset=0; o_enable=0;
+        done=0; store_h_results=0;
+        case (state)
+            RESET_H: h_reset=1;
+            RUN_H: begin
+                h_enable=1;
+                if (h_addr==783) store_h_results=1;
+            end
+            RESET_O: o_reset=1;
+            RUN_O: o_enable=1;
+            DONE: done=1;
+        endcase
+    end
+endmodule
+
+// ============================================================
+// MODULE 12: Argmax
+// ============================================================
+module argmax_unit (
+    input signed [15:0] score_0, score_1, score_2, score_3, score_4,
+    input signed [15:0] score_5, score_6, score_7, score_8, score_9,
+    output reg [3:0] predicted_digit
+);
+    reg signed [15:0] max_score;
+    always @(*) begin
+        max_score = score_0;
+        predicted_digit = 4'd0;
+        if (score_1 > max_score) begin max_score = score_1; predicted_digit = 4'd1; end
+        if (score_2 > max_score) begin max_score = score_2; predicted_digit = 4'd2; end
+        if (score_3 > max_score) begin max_score = score_3; predicted_digit = 4'd3; end
+        if (score_4 > max_score) begin max_score = score_4; predicted_digit = 4'd4; end
+        if (score_5 > max_score) begin max_score = score_5; predicted_digit = 4'd5; end
+        if (score_6 > max_score) begin max_score = score_6; predicted_digit = 4'd6; end
+        if (score_7 > max_score) begin max_score = score_7; predicted_digit = 4'd7; end
+        if (score_8 > max_score) begin max_score = score_8; predicted_digit = 4'd8; end
+        if (score_9 > max_score) begin max_score = score_9; predicted_digit = 4'd9; end
+    end
+endmodule
+
+// ============================================================
+// MODULE 13: Top-Level Accelerator
+// ============================================================
+module mnist_mlp_accelerator (
+    input clk, reset, start,
+    input [3:0] image_index,
+    output [3:0] predicted_digit,
+    output done
+);
+    wire h_reset, h_enable, o_reset, o_enable, store_h_results;
+    wire [9:0] h_addr;
+    wire [3:0] o_addr;
+    wire signed [15:0] h_relu_out [0:15];
+    wire signed [15:0] o_relu_out [0:9];
+    reg signed [15:0] hidden_activations [0:15];
+
+    accelerator_controller ctrl(
+        .clk(clk), .reset(reset), .start(start),
+        .h_reset(h_reset), .h_enable(h_enable), .h_addr(h_addr),
+        .o_reset(o_reset), .o_enable(o_enable), .o_addr(o_addr),
+        .done(done), .store_h_results(store_h_results)
+    );
+
+    genvar i;
+    generate
+        for (i=0; i<16; i=i+1) begin : hidden_layer
+            hidden_neuron hn(
+                .clk(clk), .reset(h_reset), .enable(h_enable),
+                .image_index(image_index),
+                .neuron_index(i[3:0]),
+                .addr(h_addr),
+                .relu_out(h_relu_out[i])
+            );
+        end
+    endgenerate
+
+    integer k;
+
+    always @(posedge clk) begin
+        if (store_h_results)
+            for (k=0; k<16; k=k+1)
+                hidden_activations[k] <= h_relu_out[k];
+    end
+
+
+    genvar j;
+    generate
+        for (j=0; j<10; j=j+1) begin : output_layer
+            output_neuron on(
+                .clk(clk), .reset(o_reset), .enable(o_enable),
+                .hidden_activation(hidden_activations[o_addr]),
+                .neuron_index(j[3:0]), .addr(o_addr),
+                .relu_out(o_relu_out[j])
+            );
+        end
+    endgenerate
+
+    argmax_unit argmax(
+        .score_0(o_relu_out[0]), .score_1(o_relu_out[1]), .score_2(o_relu_out[2]),
+        .score_3(o_relu_out[3]), .score_4(o_relu_out[4]), .score_5(o_relu_out[5]),
+        .score_6(o_relu_out[6]), .score_7(o_relu_out[7]), .score_8(o_relu_out[8]),
+        .score_9(o_relu_out[9]), .predicted_digit(predicted_digit)
+    );
 endmodule
